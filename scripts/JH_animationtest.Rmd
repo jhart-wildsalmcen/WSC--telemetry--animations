@@ -169,7 +169,7 @@ animation <- ggplot() +
 
 gganimate::anim_save("animations/fish1.gif",
           animation = animation,
-          width = 12, height = 12, units = "cm", res = 100, nframes = 200,
+          width = 12, height = 12, units = "cm", res = 100, nframes = 50,
           bg = "transparent") # this did work actually!
 # to initially check that the animation code works, I run with res = 100, nframes = 50 and then increase to res = 600, nframes = 200 (20 second video with 600 dpi)
 # can take an hour or more to save large animations
