@@ -50,7 +50,7 @@ ggplot() +
 
 ocean2 <- sf::as_Spatial(ocean) # needs to be an sp SpatialPolygonsDataFrame
 
-ocean.trans <- glatos::make_transition(ocean2, res = c(0.001, 0.001),
+ocean.trans <- glatos::make_transition(ocean2, res = c(0.0002, 0.0002),
                                 epsg = 4326) # 0.001 decimal degrees
 saveRDS(ocean.trans, file = "data/ocean.trans.RDS") # really useful to save this as an RDS object. For the larger study areas that we typically work in, it can take very long to create. The transition layer I use for the BC coast is 35 MB
 
@@ -76,7 +76,10 @@ names(Fish1_tags.glatos) <- c("animal_id", "detection_timestamp_utc", "deploy_lo
 
 tracks <- glatos::interpolate_path(Fish1_tags.glatos, 
                            trans = ocean.trans$transition, 
-                           lnl_thresh = 2, int_time_stamp = 21150)
+                           lnl_thresh = 2, int_time_stamp = 120)
+
+tracks$date <- lubridate::as_date(tracks$bin_timestamp)
+
 # interpolates a position every hour. Can increase to every 6 hours, day etc... but larger time gaps between interpolation points increases the chance that an interpolated point is on land
 # takes a long time for 50-100 tags with 100,000s of detections. I run on the lab's 32 GB RAM desktop, can take 2 hours (may run faster in parallel). In some cases, will not run on my personal laptop (16 GB RAM).
 # can run in batches, e.g. only 10 tags at a time, if this is an issue
@@ -85,7 +88,8 @@ tracks <- glatos::interpolate_path(Fish1_tags.glatos,
 ggplot() +
   geom_sf(data = ocean, fill = "lightblue") + 
   geom_path(data = tracks, aes(x = longitude, y = latitude, color = animal_id)) +
-  coord_sf(expand = FALSE, xlim = c(-122.97, -123.1), ylim = c(47.07, 47.15))
+  coord_sf(expand = FALSE, xlim = c(-122.97, -123.1), ylim = c(47.07, 47.15)) +
+  labs(colour = "Date")
 
 ggplot() +
   tidyterra::geom_spatraster(data = ocean.trans.terra) +
@@ -177,3 +181,128 @@ gganimate::anim_save("animations/fish1.gif",
 # note that the pink tag was only detected at the northwest receiver for the last few months, so the point remains present much longer than the blue point at its last location
 
 ```
+
+
+
+# Wes Edits
+```{r}
+bound.box <- sf::st_bbox(c(xmin = -123.15, ymin = 47, xmax = -122.9, ymax = 47.2))
+ocean.zoom <- st_crop(ocean, bound.box)
+ggplot() +
+  geom_sf(data = ocean.zoom, fill = "lightblue")
+
+
+ocean.trans2 <- glatos::make_transition3(ocean.zoom, res = c(0.0002, 0.0002)) # finer resolution
+# make_transition should be fine, too
+
+tracks <- glatos::interpolate_path(Fish1_tags.glatos, 
+                           trans = ocean.trans2$transition, 
+                           lnl_thresh = 2, int_time_stamp = 120)
+tracks$date <- lubridate::as_date(tracks$bin_timestamp)
+
+ggplot() +
+  geom_sf(data = ocean, fill = "lightblue") + 
+  geom_path(data = tracks, 
+            aes(x = longitude, y = latitude)) +
+  coord_sf(expand = FALSE, xlim = c(-122.97, -123.1), ylim = c(47.07, 47.15))+
+  labs(colour = "Date") +
+  theme(panel.grid = element_blank())
+ggsave("figures/finer-resolution.PNG", width = 17, height = 14, units = "cm")
+
+
+ocean.trans2.terra <- terra::rast(ocean.trans2$rast) 
+ggplot() +
+  tidyterra::geom_spatraster(data = ocean.trans2.terra, show.legend = FALSE,
+                             maxcell = 5e+15) +
+  geom_point(data = Fish1_tags, aes(x = longitude, y = latitude), color = "yellow") + 
+  geom_path(data = tracks, 
+            aes(x = longitude, y = latitude, color = lubridate::as_date(bin_timestamp))) +
+  coord_sf(expand = FALSE, xlim = c(-122.985, -123.1), ylim = c(47.09, 47.14)) +
+  scale_color_viridis_c(option = "A", trans = "date") +
+  labs(colour = "Date")
+ggsave("figures/finer-resolution-raster.PNG", width = 17, height = 14, units = "cm")
+```
+
+```{r Animation}
+# load in satellite basemap with the basemaps package
+satellite.box <- sf::st_bbox(c(xmin = -123.1, ymin = 47.07, xmax = -122.97, ymax = 47.15),
+                  crs = st_crs(4326))
+satellite <- basemaps::basemap_stars(ext = satellite.box, map_service = "esri",
+                                     map_type = "world_imagery", map_res = 1)
+class(satellite) # stars: raster cubes (multiple raster layers)
+sf::st_crs(satellite) # 3857 (Web Mercator)
+satellite.rgb <- stars::st_rgb(satellite) # converts 3 satellite layers (RGB) to color
+
+# convert tracks from WGS 1984 to Web Mercator (CRS 3857)
+tracks <- sf::st_as_sf(tracks, coords = c("longitude", "latitude"), crs = st_crs(4326))
+tracks <- sf::st_transform(tracks, crs = st_crs(3857))
+coords <- do.call(rbind, sf::st_geometry(tracks)) %>% 
+  as_tibble() %>% setNames(c("longitude","latitude")) # warning isn't an issue
+tracks <- cbind(tracks[1:3], coords)
+
+# make point disappear at the final detection, so it doesn't stay in the animation
+tag.ids <- sort(unique(tracks$animal_id))
+tracks$eventID <- seq(1, nrow(tracks))
+
+last.det <- data.frame(matrix(NA, nrow = 0, ncol = 4))
+names(last.det) <- c("animal_id", "bin_timestamp", "record_type", "eventID")
+for (i in 1:length(tag.ids)) {
+  tag.sub <- subset(tracks, animal_id == tag.ids[i])
+  sub.last <- tail(tag.sub, 1)
+  out <- select(sub.last, animal_id, bin_timestamp, record_type, eventID)
+  last.det <- rbind(last.det, out)
+}
+
+tracks$last_det <- FALSE
+tracks$last_det[tracks$eventID %in% last.det$eventID] <- TRUE
+tracks$tag_det <- paste(tracks$animal_id, tracks$last_det)
+
+# example receiver locations: for actual study, use all the receivers not just those detecting tags of course
+dets <- subset(tracks, record_type == "detection")
+unique.det.locations <- dets %>% group_by(longitude, latitude) %>% tally() 
+
+# make animation
+animation <- ggplot() +
+  #satellite map
+  geom_stars(data = satellite.rgb) +
+  coord_sf(expand = FALSE) +
+  
+  # receiver locations
+  geom_point(data = unique.det.locations,
+             aes(x = longitude, y = latitude), colour = "#F3E356") +
+  
+  # tag tracks
+  geom_path(data = tracks,
+            aes(x = longitude, y = latitude, 
+                group = animal_id, color = animal_id),
+            alpha = 0.4, linewidth = 0.7) +
+  scale_color_manual(values = c("#5BBAF2", "#e3766e")) +
+  ggnewscale::new_scale_color() +
+  geom_point(data = tracks, 
+            aes(x = longitude, y = latitude, 
+                group = animal_id, color = tag_det),
+            size = 1.8) +
+  scale_color_manual(values = c("#5BBAF2", "transparent", "#e3766e", "transparent")) +
+  
+  # animate
+  gganimate::transition_reveal(bin_timestamp) +
+  labs(title = "DateTime: {lubridate::as_date(frame_along)}") +
+  gganimate::ease_aes("linear") +
+  
+  # theme
+  theme_void() + 
+  theme(legend.position = "none",
+        panel.background = element_rect(fill = "black"),
+        plot.background = element_rect(fill = "black"),
+        plot.title = element_text(color = "white"))
+
+gganimate::anim_save("animations/fish1.gif",
+          animation = animation,
+          width = 12, height = 12, units = "cm", res = 100, nframes = 50,
+          bg = "transparent") # this did work actually!
+# to initially check that the animation code works, I run with res = 100, nframes = 50 and then increase to res = 600, nframes = 200 (20 second video with 600 dpi)
+# can take an hour or more to save large animations
+
+# note that the pink tag was only detected at the northwest receiver for the last few months, so the point remains present much longer than the blue point at its last location
+```
+
